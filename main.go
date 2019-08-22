@@ -21,35 +21,14 @@ import (
 
 var log = logging.MustGetLogger("example")
 
-var format = logging.MustStringFormatter(
-	`%{color}%{time:15:04:05.000} %{shortfunc} ▶ %{level:.4s} %{id:03x}%{color:reset} %{message}`,
-)
-
 var serverInfo = flag.String("s", "localhost:6666", "quic server host and port")
-var typ = flag.String("t", "server", "quic server or client. Client will send a message and waiting for receiving a message. Server will receive a message and echo back")
-var intval = flag.Int("intval", 1000, "[client] send intval ms")
-var cnt = flag.Int("c", 1, "[client] send count")
+var bitrate = flag.Int("bitrate", 1000000, "send bitrate bps, this will sleep with 10ms")
 var message = flag.String("m", "hello gquic from client", "[client] send content")
 var isRandom = flag.Bool("r", false, "[client] use random string, works with rlen")
-var rlen = flag.Int("rlen", 10, "[client] random string len, works with r")
-var loop = flag.Bool("loop", false, "[client] forever sends data")
 var dump = flag.Bool("d", false, "dump content?")
-var echo = flag.Bool("e", true, "echo / check  echo the data?")
 var auth = flag.Bool("auth", false, "use mutual auth?")
 var con = flag.Int("con", 1, "concurrent clients initiated sessions")
 var promPort = flag.Int("port", 8811, "prometheus export port")
-
-func initLog() {
-
-	backend2 := logging.NewLogBackend(os.Stdout, "", 0)
-	backend2Formatter := logging.NewBackendFormatter(backend2, format)
-
-	backend1 := logging.NewLogBackend(os.Stdout, "", 0)
-	backend1Leveled := logging.AddModuleLevel(backend1)
-	backend1Leveled.SetLevel(logging.ERROR, "")
-
-	logging.SetBackend(backend1Leveled, backend2Formatter)
-}
 
 func main() {
 	initLog()
@@ -86,11 +65,9 @@ func main() {
 	log.Info("Exited")
 }
 
-var quicBytes map[string]int
+var quicBytes sync.Map
 
 func client(serverInfo string) error {
-
-	quicBytes = make(map[string]int)
 
 	pool := x509.NewCertPool()
 	caCertPath := "ca.crt"
@@ -130,20 +107,19 @@ func client(serverInfo string) error {
 
 	msg := *message
 
-	for c := 0; c < *cnt; c++ {
-		if *isRandom {
-			msg = RandStringRunes(*rlen)
-		}
+	loop := 0
+	for {
 
-		if *loop {
-			c = 0
+		if *isRandom {
+			msg = RandStringRunes(*bitrate / 8 / 100)
 		}
 
 		if *dump {
-			log.Infof("Client %s: Snd '%s', count : %d\n", session.LocalAddr(), msg, c)
+			log.Infof("Client %s: Snd '%s', count : %d\n", session.LocalAddr(), msg, loop)
 		} else {
-			log.Infof("Client %s: Snd count : %d\n", session.LocalAddr(), c)
+			log.Infof("Client %s: Snd count : %d\n", session.LocalAddr(), loop)
 		}
+
 		// startTime := time.Now()
 		var writeBytes int
 		writeBytes, err = stream.Write([]byte(msg))
@@ -152,14 +128,19 @@ func client(serverInfo string) error {
 		}
 		log.Info("Done, bytes:", writeBytes)
 
-		quicBytes[session.LocalAddr().String()] += writeBytes
+		bytesSend, _ := quicBytes.Load(session.LocalAddr().String())
+
+		if bytesSend == nil {
+			bytesSend = 0
+		}
+
+		quicBytes.Store(session.LocalAddr().String(), writeBytes+bytesSend.(int))
 
 		// elapsed := time.Since(startTime)
 		// log.Infof("Cost: %s\n", elapsed)
 
-		if *cnt != 1 {
-			time.Sleep(time.Duration(*intval) * time.Millisecond)
-		}
+		time.Sleep(time.Duration(10 * time.Millisecond))
+		loop++
 	}
 
 	return nil
@@ -181,6 +162,20 @@ func getTLSConfig() (tls.Config, error) {
 	}
 
 	return tls.Config{Certificates: []tls.Certificate{tlsCert}}, nil
+}
+
+func initLog() {
+
+	var format = logging.MustStringFormatter(
+		`%{color}%{time:15:04:05.000} %{shortfunc} ▶ %{level:.4s} %{color:reset} %{message}`,
+	)
+
+	backend := logging.NewLogBackend(os.Stdout, "", 0)
+	backendFormatter := logging.NewBackendFormatter(backend, format)
+	backendLeveled := logging.AddModuleLevel(backendFormatter)
+	backendLeveled.SetLevel(logging.ERROR, "")
+
+	logging.SetBackend(backendLeveled)
 }
 
 func init() {
@@ -206,12 +201,16 @@ func (c *pushCollect) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (c *pushCollect) Collect(ch chan<- prometheus.Metric) {
-	for k, v := range quicBytes {
+
+	f := func(k, v interface{}) bool {
 		ch <- prometheus.MustNewConstMetric(
 			c.Sendbytes,
 			prometheus.GaugeValue,
-			float64(v),
-			k,
+			float64(v.(int)),
+			k.(string),
 		)
+		return true
 	}
+	quicBytes.Range(f)
+
 }
