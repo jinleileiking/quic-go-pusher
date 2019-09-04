@@ -36,9 +36,15 @@ func main() {
 
 	col := pushCollect{
 		Sendbytes: prometheus.NewDesc(
-			"quic_pusher",
+			"quic_pusher_send_bytes",
 			"the total bytes send by the client",
 			[]string{"connection"},
+			nil,
+		),
+		SendPeriodCostTimeMs: prometheus.NewDesc(
+			"quic_pusher_period_send_cost_ms",
+			"the cost ms for send burst",
+			nil,
 			nil,
 		),
 	}
@@ -66,6 +72,7 @@ func main() {
 }
 
 var quicBytes sync.Map
+var sendPeriodCostTimeMs int
 
 func client(serverInfo string) error {
 
@@ -111,7 +118,8 @@ func client(serverInfo string) error {
 	for {
 
 		if *isRandom {
-			msg = RandStringRunes(*bitrate / 8 / 100)
+			// msg = RandStringRunes(*bitrate / 8 / 100)
+			msg = RandStringRunes(*bitrate / 8)
 		}
 
 		if *dump {
@@ -120,12 +128,15 @@ func client(serverInfo string) error {
 			log.Infof("Client %s: Snd count : %d\n", session.LocalAddr(), loop)
 		}
 
-		// startTime := time.Now()
+		startTime := time.Now()
 		var writeBytes int
 		writeBytes, err = stream.Write([]byte(msg))
 		if err != nil {
 			return errors.Wrap(err, "stream.Write failed")
 		}
+		elapsed := time.Since(startTime)
+		sendPeriodCostTimeMs = int(elapsed.Nanoseconds() / 1000)
+
 		log.Info("Done, bytes:", writeBytes)
 
 		bytesSend, _ := quicBytes.Load(session.LocalAddr().String())
@@ -136,10 +147,9 @@ func client(serverInfo string) error {
 
 		quicBytes.Store(session.LocalAddr().String(), writeBytes+bytesSend.(int))
 
-		// elapsed := time.Since(startTime)
 		// log.Infof("Cost: %s\n", elapsed)
 
-		time.Sleep(time.Duration(10 * time.Millisecond))
+		// time.Sleep(time.Duration(10 * time.Millisecond))
 		loop++
 	}
 
@@ -193,11 +203,13 @@ func RandStringRunes(n int) string {
 }
 
 type pushCollect struct {
-	Sendbytes *prometheus.Desc
+	Sendbytes            *prometheus.Desc
+	SendPeriodCostTimeMs *prometheus.Desc
 }
 
 func (c *pushCollect) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.Sendbytes
+	ch <- c.SendPeriodCostTimeMs
 }
 
 func (c *pushCollect) Collect(ch chan<- prometheus.Metric) {
@@ -213,4 +225,9 @@ func (c *pushCollect) Collect(ch chan<- prometheus.Metric) {
 	}
 	quicBytes.Range(f)
 
+	ch <- prometheus.MustNewConstMetric(
+		c.SendPeriodCostTimeMs,
+		prometheus.GaugeValue,
+		float64(sendPeriodCostTimeMs),
+	)
 }
